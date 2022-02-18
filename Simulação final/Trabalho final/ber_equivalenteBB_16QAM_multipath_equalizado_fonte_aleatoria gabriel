@@ -1,0 +1,170 @@
+clear;
+clc;
+close all;
+
+Fs=44100;
+Ts=1/Fs;
+
+Fc=8000;
+
+oversampling=10;
+R=Fs/oversampling;
+T=1/R;
+
+del=25;
+
+rolloff=0.5;
+
+N       = 31;
+K       = 21;
+t       = 2;
+
+W       = 2e5;
+Wc      = 1e2;
+bits_msg = round(rand(W,K));
+
+for S = ["16-QAM" "16-QAM with BCH(31,21)"]
+    switch S
+        case "16-QAM"
+            bits_msg_i  = reshape(bits_msg,Wc,K,W/Wc);
+            bit_symbols = zeros(Wc*K/2,2,W/Wc);
+            for i = 1:1:W/Wc
+                bit_symbols(:,:,i) = reshape(bits_msg_i(:,:,i),Wc*K/2,2);
+            end
+        case "16-QAM with BCH(31,21)"
+            bits_msg_i  = reshape(bits_msg,Wc,K,W/Wc);
+            bit_symbols = zeros(Wc*N/2,2,W/Wc);
+            for i = 1:1:W/Wc
+                bits_msg_gf = gf(bits_msg_i(:,:,i));
+                msg_coded   = bchenc(bits_msg_gf,N,K);
+                bit_symbols_gf = reshape(msg_coded,Wc*N/2,2);
+                bit_symbols(:,:,i) = double(bit_symbols_gf.x);
+            end
+    end
+
+    num_erros   = zeros(1,16);
+    BER         = zeros(1,16);
+    for i = 1:1:size(bit_symbols,3)
+        symbols=bi2de(bit_symbols(:,:,i));
+        a=[-3 -1 3 1];
+        symbols=symbols+1;
+        pam=a(symbols);
+
+         pam_I=pam(1:2:length(pam));
+         pam_Q=pam(2:2:length(pam));
+
+        filtro=rcosfir(rolloff,del,oversampling,1,'sqrt');
+
+        sinal_tx_I=upsample(pam_I,oversampling);
+        sinal_tx_Q=upsample(pam_Q,oversampling);
+        sinal_tx_filtrado_I=conv(sinal_tx_I,filtro);
+        sinal_tx_filtrado_Q=conv(sinal_tx_Q,filtro);
+
+        sinal_QAM=sinal_tx_filtrado_I+1j*sinal_tx_filtrado_Q;
+
+        ISI_channel = [0.19+.56j .45-1.28j -.14-.53j -.19+.23j .33+.51j];
+
+        L1=1; L2=3; 
+        N1=5; N2=10; 
+        P=convmtx(ISI_channel.',N1+N2+1);  
+        u_ZF=zeros(N1+N2+L1+L2+1,1); 
+        u_ZF(L1+N1+1)=1; 
+        c_LS=((P'*P)\(P'))*u_ZF; 
+
+        if S == "16-QAM" && i == W/Wc
+            figure(1);
+
+            [H,F]=freqz(ISI_channel,1,2048,'whole',Fs);
+            gain=20*log10(fftshift(abs(H)));
+            plot((F-Fs/2)/1000,gain,'LineWidth',2);
+            hold;
+            [H_LS,F]=freqz(c_LS,1,2048,'whole',Fs); 
+            gain=20*log10(fftshift(abs(H_LS)));
+            plot((F-Fs/2)/1000,gain,'r','LineWidth',2);
+            H_tot=H.*H_LS;
+            gain=20*log10(fftshift(abs(H_tot)));
+            plot((F-Fs/2)/1000,gain,'k','LineWidth',2); grid;
+            axis([-Fs/(2*1000) Fs/(2*1000) -20 15]);
+            xlabel('Frequência (kHz)');
+            ylabel('Ganho (dB)');
+            legend('Resposta do Canal','Resposta do Equalizador','Resposta Total');
+        end
+
+        sinal_rx_ISI=filter(ISI_channel,1,sinal_QAM);
+
+        ebn0=0:1:15;
+        M=4;
+
+        for k=1:1:length(ebn0)
+
+        sinal_rx_ISI_ruido = awgn(sinal_rx_ISI,(ebn0(k)+10*log10(log2(M))-10*log10(oversampling/2)),'measured');
+
+        sinal_equalizado=filter(c_LS,1,sinal_rx_ISI_ruido);
+        sinal_equalizado=sinal_equalizado(L1+N1+1:end);
+
+        sinal_rx_casado_I=conv(real(sinal_equalizado),filtro);
+        sinal_rx_casado_Q=conv(imag(sinal_equalizado),filtro); 
+
+        pam_rx_I=downsample(sinal_rx_casado_I,oversampling);
+        pam_rx_Q=downsample(sinal_rx_casado_Q,oversampling);
+        pam_rx_I=pam_rx_I(del*2+1:length(pam_rx_I)-del*2);
+        pam_rx_Q=pam_rx_Q(del*2+1:length(pam_rx_Q)-del*2);
+
+        alphabet=[-3 -1 1 3];
+        symbols_rx_quant_I=quantalph(pam_rx_I,alphabet);
+        symbols_rx_quant_Q=quantalph(pam_rx_Q,alphabet);
+
+        a=[0 1 3 2];
+        symbols_rx_I=(symbols_rx_quant_I+3)/2+1;
+        symbols_rx_Q=(symbols_rx_quant_Q+3)/2+1;
+        symbols_rx=zeros(1,length(pam));
+        symbols_rx(1:2:length(pam))=symbols_rx_I;
+        symbols_rx(2:2:length(pam))=symbols_rx_Q;
+        symbols_rx=a(symbols_rx);
+        bit_symbols_rx=de2bi(symbols_rx);
+
+        switch S
+            case "16-QAM"
+                bits_msg_rx = reshape(bit_symbols_rx,Wc,K);
+            case "16-QAM with BCH(31,21)"
+                bit_symbols_rx_gf=gf(bit_symbols_rx);
+                bit_symbols_rx_gf=reshape(bit_symbols_rx_gf,Wc,N);
+                msg_decoded=bchdec(bit_symbols_rx_gf,N,K);
+                bits_msg_rx=double(msg_decoded.x);
+        end
+
+        [x(k),y(k)]=symerr(bits_msg_rx,bits_msg_i(:,:,i));
+        
+        num_erros(k) = num_erros(k) + x(k);
+        BER(k) = BER(k) + y(k)*Wc/W;
+        end
+        disp(i);
+    end
+    
+    if S == "16-QAM"
+        BER_2 = zeros(1, length(ebn0));
+        for i = 1:1:length(ebn0)
+            Pc = 1/log2(M)*2*(1-1/sqrt(M))*erfc(sqrt(K/N*10^(ebn0(i)/10)));
+            for j = (t + 1):1:N
+                BER_2(i) = BER_2(i) + j*(1 - Pc)^(N - j)*Pc^j*nchoosek(N, j)/N;
+            end
+        end
+    end
+
+    figure(5);
+    switch S
+        case "16-QAM"
+            semilogy(ebn0,BER,'LineWidth',2,'DisplayName','16-QAM')
+            hold on
+            semilogy(ebn0,BER_2,'LineWidth',2,'DisplayName','16-QAM with Theoretical BCH(31,21)')
+            hold on
+        case "16-QAM with BCH(31,21)"
+            semilogy(ebn0,BER,'LineWidth',2,'DisplayName','16-QAM with BCH(31,21)')
+    end
+    grid on
+    xlabel('E_b/N_0 (dB)');
+    ylabel('BER');
+    title('Taxa de Erro de Bits');
+    axis([0 15 1e-8 1]);
+end
+legend;
